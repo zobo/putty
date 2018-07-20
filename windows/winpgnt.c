@@ -467,6 +467,33 @@ static void prompt_add_keyfile(void)
 }
 
 /*
+* Add CAPI certificate (via dialog box)
+*/
+static BOOL cert_box = FALSE;
+extern const struct ssh_signkey ssh_capi;
+char *capi_getcomment(void *data);
+
+static void prompt_add_cert(void)
+{
+	struct ssh2_userkey *skey;
+
+	skey = snew(struct ssh2_userkey);
+	skey->alg = &ssh_capi;
+	cert_box = TRUE;
+	skey->data = ssh_capi.newkey(&ssh_capi, NULL, 0);
+	cert_box = FALSE;
+	if (skey->data) {
+		skey->comment = capi_getcomment(skey->data);
+		if (!pageant_add_ssh2_key(skey)) {
+			skey->alg->freekey(skey->data);
+			sfree(skey);
+		}
+		else
+			keylist_update();
+	}
+}
+
+/*
  * Dialog-box function for the key list box.
  */
 static INT_PTR CALLBACK KeyListProc(HWND hwnd, UINT msg,
@@ -596,6 +623,15 @@ static INT_PTR CALLBACK KeyListProc(HWND hwnd, UINT msg,
 		launch_help(hwnd, WINHELP_CTX_pageant_general);
             }
 	    return 0;
+	  case 104:		      /* add cert */
+	  {
+		  if (cert_box) {
+			  MessageBeep(MB_ICONERROR);
+			  break;
+		  }
+		  prompt_add_cert();
+	  }
+	  return 0;
 	}
 	return 0;
       case WM_HELP:

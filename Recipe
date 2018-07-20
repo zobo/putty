@@ -341,6 +341,7 @@ pageant  : [G] winpgnt pageant sshrsa sshpubk sshdes ARITH sshmd5 version
 	 + tree234 MISC sshaes sshsha winsecur winpgntc aqsync sshdss sshsh256
 	 + sshsh512 winutils sshecc winmisc winmiscs winhelp conf pageant.res
 	 + sshauxcrypt sshhmac LIBS
+	 + winsshcapi cryptUI.lib crypt32.lib
 
 puttygen : [G] winpgen sshrsag sshdssg sshprime sshdes ARITH sshmd5 version
          + sshrand winnoise sshsha winstore MISC winctrls sshrsa sshdss winmisc
