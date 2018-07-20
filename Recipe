@@ -307,6 +307,7 @@ psftp    : [C] psftp winsftp wincons WINSSH BE_SSH SFTP wildcard WINMISC
 pageant  : [G] winpgnt pageant sshrsa sshpubk sshdes sshbn sshmd5 version
 	 + tree234 misc sshaes sshsha winsecur winpgntc aqsync sshdss sshsh256
 	 + sshsh512 winutils sshecc winmisc winhelp conf pageant.res LIBS
+	 + winsshcapi cryptUI.lib crypt32.lib
 
 puttygen : [G] winpgen sshrsag sshdssg sshprime sshdes sshbn sshmd5 version
          + sshrand winnoise sshsha winstore misc winctrls sshrsa sshdss winmisc
