@@ -56,7 +56,7 @@ static void *capi_newkey(const struct ssh_signkey *self,
 	if (!ci->cstore)
 		goto fail;
 
-	/* iscemo certifikat z dolocenim imenom */
+	/* searching for a cert with name */
 	if (data)
 		ci->cert = CertFindCertificateInStore(
 			ci->cstore,
@@ -96,19 +96,19 @@ static void *capi_newkey(const struct ssh_signkey *self,
 			ci->key->comment,
 			nlen);
 	}
-	/* polnjenje RSA strukture */
+	/* fill the RSA struture */
 	{
 		PCRYPT_BIT_BLOB cbb = &ci->cert->pCertInfo->SubjectPublicKeyInfo.PublicKey;
 		unsigned char *p = cbb->pbData;
 		unsigned int size;
 		int i;
 #define GET_SIZE(s) if (*p<0x80) s=(unsigned int)*p++; else {for(i=0x80, s=0; i<*p; i++) s = (s << 8) + p[i-0x7f]; p+=i-0x7f;}
-		/* Tukaj se izlusci modulus in exponent, in se jih z bignum_from_bytes doda v ci->key*/
+		/* Get modulus and exponent, user bignum_from_bytes to add to ci->key */
 		if (*p++ != 0x30)
-			goto fail; /* neki je hudo narobe z replayem.. ne zacne se na 0x30 */
+			goto fail; /* Something is very wrong... Does not begin with 0x30 */
 		GET_SIZE(size);
 		if (size > cbb->cbData)
-			goto fail; /* spet problem v blobu */
+			goto fail; /* blob problem */
 		if (*p++ != 0x02)
 			goto fail;
 		GET_SIZE(size);
@@ -134,7 +134,7 @@ fail:
 }
 
 /*
- * Sprosti vse resourse
+ * Release resources
  */
 static void capi_freekey(void *data)
 {
@@ -149,7 +149,7 @@ static void capi_freekey(void *data)
 }
 
 /*
- * Wraper za public blob
+ * Public blob wrapper
  */
 static unsigned char *capi_public_blob(void *data, int *len)
 {
@@ -158,7 +158,7 @@ static unsigned char *capi_public_blob(void *data, int *len)
 }
 
 /*
- * To podpise data.. Lahko samo upam, da ga podpisuje na pravi nacin.. sicer sem fucked!!
+ * Sign data
  */
 static unsigned char *capi_sign(void *key, const char *data, int datalen,
 				int *siglen)
@@ -217,8 +217,7 @@ static unsigned char *capi_sign(void *key, const char *data, int datalen,
 	{
 		goto fail1;
 	}
-	/* imamo podpisano krneki */
-	/* probamo dobit raw podpis */
+	/* We have a signed bytes, now decode into raw signature */
 	hMsg = CryptMsgOpenToDecode(
 				(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING),
 				CMSG_DETACHED_FLAG,
@@ -263,7 +262,7 @@ static unsigned char *capi_sign(void *key, const char *data, int datalen,
 	}
     CryptMsgClose(hMsg);
 
-	// Od tu naprej se oblikuje razultat. V nbytes pride rezultat priv key op (128?)
+	/* construct the ssh signature payload */
     bytes = snewn(4 + 7 + 4 + nbytes, unsigned char);
     PUT_32BIT(bytes, 7);
     memcpy(bytes + 4, "ssh-rsa", 7);
