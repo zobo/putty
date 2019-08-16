@@ -14,38 +14,38 @@
 
 #include "ssh.h"
 #include "misc.h"
+#include "mpint.h"
 
 struct capi_info {
 	HCERTSTORE cstore;
 	PCCERT_CONTEXT cert;
-	struct RSAKey *key;
+	RSAKey key;
+	ssh_key sshk;
 };
+typedef struct capi_info capi_info;
 
+const ssh_keyalg ssh_capi;
 
-char *capi_getcomment(void *data)
+char *capi_getcomment(ssh_key *key)
 {
-	struct capi_info *ci = (struct capi_info *) data;
-	return ci->key->comment;
+	capi_info *ci = container_of(key, capi_info, sshk);
+	return ci->key.comment;
 }
 
 /*
  * Open CertStore and finds cert or open dialog.
  */
-static void *capi_newkey(const struct ssh_signkey *self,
-	const char *data, int len)
+static ssh_key *capi_newkey(const ssh_keyalg *self,	ptrlen data)
 {
 	struct capi_info *ci;
     int nlen;
 		
-    ci = snew(struct capi_info);
+    ci = snew(capi_info);
     if (!ci)
 		return NULL;
-	memset(ci, 0, sizeof(struct capi_info));
+	memset(ci, 0, sizeof(capi_info));
+	ci->sshk.vt = &ssh_capi;
 
-	ci->key = snew(struct RSAKey); 
-	if (!ci->key)
-		goto fail;
-	memset(ci->key, 0, sizeof(struct RSAKey));
 	/* open cert store */
 	ci->cstore = CertOpenStore(
 		CERT_STORE_PROV_SYSTEM,
@@ -57,13 +57,13 @@ static void *capi_newkey(const struct ssh_signkey *self,
 		goto fail;
 
 	/* searching for a cert with name */
-	if (data)
+	if (data.ptr)
 		ci->cert = CertFindCertificateInStore(
 			ci->cstore,
 			(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING),
 			0,
 			CERT_FIND_SUBJECT_STR,
-			data,
+			data.ptr,
 			NULL);
 	else
 		ci->cert = CryptUIDlgSelectCertificateFromStore(
@@ -85,22 +85,22 @@ static void *capi_newkey(const struct ssh_signkey *self,
 		NULL,
 		0);
 	if (nlen == 1)
-		ci->key->comment = strdup("Noname");
+		ci->key.comment = strdup("Noname");
 	else {
-		ci->key->comment = snewn(nlen, char);
+		ci->key.comment = snewn(nlen, char);
 		CertGetNameString(
 			ci->cert,
 			CERT_NAME_SIMPLE_DISPLAY_TYPE,
 			0,
 			NULL,
-			ci->key->comment,
+			ci->key.comment,
 			nlen);
 	}
 	/* fill the RSA struture */
 	{
 		PCRYPT_BIT_BLOB cbb = &ci->cert->pCertInfo->SubjectPublicKeyInfo.PublicKey;
 		unsigned char *p = cbb->pbData;
-		unsigned int size;
+		size_t size;
 		int i;
 #define GET_SIZE(s) if (*p<0x80) s=(unsigned int)*p++; else {for(i=0x80, s=0; i<*p; i++) s = (s << 8) + p[i-0x7f]; p+=i-0x7f;}
 		/* Get modulus and exponent, user bignum_from_bytes to add to ci->key */
@@ -112,19 +112,19 @@ static void *capi_newkey(const struct ssh_signkey *self,
 		if (*p++ != 0x02)
 			goto fail;
 		GET_SIZE(size);
-		ci->key->modulus = bignum_from_bytes(p, size);
+
+		ci->key.modulus = mp_from_bytes_be(make_ptrlen(p, size));
 		p += size;
 		if (*p++ != 0x02)
 			goto fail;
 		GET_SIZE(size);
-		ci->key->exponent = bignum_from_bytes(p, size);
+		ci->key.exponent = mp_from_bytes_be(make_ptrlen(p, size));
 #undef GET_SIZE
 	}
-    return ci;
+    return &ci->sshk;
 
 fail:
-	if (ci->key)
-		freersakey(ci->key);
+	freersakey(&ci->key);
 	if (ci->cert)
 		CertFreeCertificateContext(ci->cert);
 	if (ci->cstore)
@@ -136,11 +136,10 @@ fail:
 /*
  * Release resources
  */
-static void capi_freekey(void *data)
+static void capi_freekey(ssh_key *key)
 {
-    struct capi_info *ci = (struct capi_info *) data;
-	if (ci->key)
-		freersakey(ci->key);
+	capi_info *ci = container_of(key, capi_info, sshk);
+	freersakey(&ci->key);
 	if(ci->cert)
 		CertFreeCertificateContext(ci->cert);
 	if(ci->cstore)
@@ -151,28 +150,32 @@ static void capi_freekey(void *data)
 /*
  * Public blob wrapper
  */
-static unsigned char *capi_public_blob(void *data, int *len)
+static void capi_public_blob(ssh_key *key, BinarySink *bs)
 {
-	struct capi_info *ci = (struct capi_info *) data;
-	return ssh_rsa.public_blob(ci->key, len);
+	capi_info *ci = container_of(key, capi_info, sshk);
+
+	// copy from sshrsa.c
+	put_stringz(bs, "ssh-rsa");
+	put_mp_ssh2(bs, ci->key.exponent);
+	put_mp_ssh2(bs, ci->key.modulus);
 }
 
 /*
  * Sign data
  */
-static unsigned char *capi_sign(void *key, const char *data, int datalen,
-				int *siglen)
+static void capi_sign(ssh_key *key, ptrlen data, unsigned flags, BinarySink *bs)
 {
-    struct capi_info *ci = (struct capi_info *) key;
-    unsigned char *bytes;
-    int nbytes;
-	unsigned char *tmpsig;
-    unsigned char *tmpbytes;
+	capi_info *ci = container_of(key, capi_info, sshk);
+    size_t nbytes;
+	unsigned char *tmpsig = 0;
+    unsigned char *tmpbytes = 0;
 	int tmpnbytes;
 	int i;
+	const char *sign_alg_name;
 
 	CRYPT_SIGN_MESSAGE_PARA   SignMessagePara;
 	HCRYPTMSG hMsg;
+
 	// Optional check?
 	i = MessageBox(
 			NULL,
@@ -180,38 +183,48 @@ static unsigned char *capi_sign(void *key, const char *data, int datalen,
 			"Pageant - Sign request",
 			MB_YESNO | MB_ICONQUESTION);
 	if (i != IDYES)
-		return NULL;
+		return;
 	// 
-
 	memset(&SignMessagePara, 0, sizeof(CRYPT_SIGN_MESSAGE_PARA));
 	SignMessagePara.cbSize = sizeof(CRYPT_SIGN_MESSAGE_PARA);
-	SignMessagePara.HashAlgorithm.pszObjId = szOID_RSA_SHA1RSA;
+
+	if (flags & SSH_AGENT_RSA_SHA2_256) {
+		sign_alg_name = "rsa-sha2-256";
+		SignMessagePara.HashAlgorithm.pszObjId = szOID_RSA_SHA256RSA;
+	} else if (flags & SSH_AGENT_RSA_SHA2_512) {
+		sign_alg_name = "rsa-sha2-512";
+		SignMessagePara.HashAlgorithm.pszObjId = szOID_RSA_SHA512RSA;
+	} else {
+		sign_alg_name = "ssh-rsa";
+		SignMessagePara.HashAlgorithm.pszObjId = szOID_RSA_SHA1RSA;
+	}
+
 	SignMessagePara.pSigningCert = ci->cert;
 	SignMessagePara.dwMsgEncodingType = (PKCS_7_ASN_ENCODING | X509_ASN_ENCODING);
 	SignMessagePara.cMsgCert = 0;
 	SignMessagePara.rgpMsgCert = NULL;
 	
-	if(CryptSignMessage(
-			&SignMessagePara,
-			TRUE,
-			1,
-			&data,
-			&datalen,
-			NULL,
-			&tmpnbytes))
+	if (CryptSignMessage(
+		&SignMessagePara,
+		TRUE,
+		1,
+		(const BYTE **)&data.ptr,
+		&data.len,
+		NULL,
+		&tmpnbytes))
 	{
 		tmpbytes = snewn(tmpnbytes, unsigned char);
 		if (!tmpbytes)
-			return NULL;
+			return;
 	}
 	else
-		return NULL;
+		return;
 	if(!CryptSignMessage(
 			&SignMessagePara,
 			TRUE,
 			1,
-			&data,
-			&datalen,
+			(const BYTE **)&data.ptr,
+			&data.len,
 			tmpbytes,
 			&tmpnbytes))
 	{
@@ -258,41 +271,49 @@ static unsigned char *capi_sign(void *key, const char *data, int datalen,
 		&nbytes))
 	{
 		sfree(tmpsig);
+		tmpsig = NULL;
 		goto fail1;
 	}
     CryptMsgClose(hMsg);
 
-	/* construct the ssh signature payload */
-    bytes = snewn(4 + 7 + 4 + nbytes, unsigned char);
-    PUT_32BIT(bytes, 7);
-    memcpy(bytes + 4, "ssh-rsa", 7);
-    PUT_32BIT(bytes + 4 + 7, nbytes);
-    for (i = 0; i < nbytes; i++)
-	bytes[4 + 7 + 4 + i] = tmpsig[i];
-    sfree(tmpsig);
+	put_stringz(bs, sign_alg_name);
+	put_uint32(bs, nbytes);
 
-    *siglen = 4 + 7 + 4 + nbytes;
-    return bytes;
+	for (size_t i = 0; i < nbytes; i++)
+		put_byte(bs, tmpsig[i]);
 
 fail1:
+	if (tmpbytes)
 		sfree(tmpbytes);
-		return NULL;
+	if (tmpsig)
+		sfree(tmpsig);
 }
 
-const struct ssh_signkey ssh_capi = {
-    capi_newkey,
-    capi_freekey,
-    NULL, /* fmtkey, */
-    capi_public_blob,
-    NULL, /* private_blob */
-    NULL, /* createkey */
-    NULL, /* openssh_createkey */
-    NULL, /* openssh_fmtkey, */
-	0,    /* openssh_private_npieces */
+char *capi_invalid(ssh_key *key, unsigned flags)
+{
+	capi_info *ci = container_of(key, capi_info, sshk);
+	// todo
+	if (flags != 0 && flags != SSH_AGENT_RSA_SHA2_256 && flags != SSH_AGENT_RSA_SHA2_512) {
+		return dupprintf("unknown flags for capi: %x", flags);
+	}
+	return NULL;
+}
+
+const ssh_keyalg ssh_capi = {
+	capi_newkey, /* new_pub */
+	NULL, /* new_priv */
+	NULL, /* new_priv_openssh */
+	capi_freekey, /* freekey */
+	capi_invalid, /* invalid */
+	capi_sign, /* sign */
+	NULL, /* verify */
+	capi_public_blob, /* public_blob */
+	NULL, /* private_blob */
+	NULL, /* openssh_blob */
+	NULL, /* cache_str */
 	NULL, /* pubkey_bits */
-    NULL, /* verifysig */
-    capi_sign,
-    "ssh-rsa-capi",
-    "rsa2",
-	NULL
+	"ssh-rsa-capi", /* ssh_id */
+	"rsa2", /* cache_id */
+	NULL, /* extra */
+	SSH_AGENT_RSA_SHA2_256 | SSH_AGENT_RSA_SHA2_512,
 };

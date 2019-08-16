@@ -470,22 +470,21 @@ static void prompt_add_keyfile(void)
 * Add CAPI certificate (via dialog box)
 */
 static BOOL cert_box = FALSE;
-extern const struct ssh_signkey ssh_capi;
-char *capi_getcomment(void *data);
+extern const ssh_keyalg ssh_capi;
+char *capi_getcomment(ssh_key *key);
 
 static void prompt_add_cert(void)
 {
 	struct ssh2_userkey *skey;
 
 	skey = snew(struct ssh2_userkey);
-	skey->alg = &ssh_capi;
 	cert_box = TRUE;
-	skey->data = ssh_capi.newkey(&ssh_capi, NULL, 0);
+	skey->key = ssh_capi.new_pub(&ssh_capi, make_ptrlen(NULL, 0), make_ptrlen(NULL, 0));
 	cert_box = FALSE;
-	if (skey->data) {
-		skey->comment = capi_getcomment(skey->data);
+	if (skey->key) {
+		skey->comment = capi_getcomment(skey->key);
 		if (!pageant_add_ssh2_key(skey)) {
-			skey->alg->freekey(skey->data);
+			skey->key->vt->freekey(skey);
 			sfree(skey);
 		}
 		else
